@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft-testing)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      624.0.0
+// @version      625.0.0
 // @description  Multiple solutions for blocking Twitch ads (vaft testing variant)
 // @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
 // @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 624;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 625;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1696,6 +1696,15 @@
                         // Skip the buffer-stall check while the <video> element isn't actively trying
                         // to play (readyState < 2 or paused) — those are init / pause states, not stalls.
                         const playerNotActivelyPlaying = videoEl && (videoEl.readyState < 2 || videoEl.paused);
+                        // FFZ's audio compressor recreates the <video> element on every player.load().
+                        // Treat any element-identity change as a fresh reload — clear counters so
+                        // the post-recreate ramp-up isn't counted as a stall.
+                        if (videoEl && playerBufferState.videoElement && playerBufferState.videoElement !== videoEl) {
+                            playerBufferState.numSame = 0;
+                            playerBufferState.fixAttempts = 0;
+                            playerBufferState.recoveryReloadUsed = false;
+                        }
+                        playerBufferState.videoElement = videoEl;
                         const positionFrozen = (playerBufferState.position == position) &&
                             (playerBufferState.videoCurrentTime === undefined || playerBufferState.videoCurrentTime === videoCurrentTime);
                         if (playerNotActivelyPlaying) {

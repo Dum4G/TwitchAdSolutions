@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 624;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 625;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1675,6 +1675,15 @@ twitch-videoad.js text/javascript
                         // NOTE: This could be improved. It currently lets the player fully eat the full buffer before it triggers pause/play
                         // Skip while <video> isn't actively playing (readyState < 2 or paused).
                         const playerNotActivelyPlaying = videoEl && (videoEl.readyState < 2 || videoEl.paused);
+                        // FFZ's audio compressor recreates the <video> element on every player.load().
+                        // Treat any element-identity change as a fresh reload — clear counters so
+                        // the post-recreate ramp-up isn't counted as a stall.
+                        if (videoEl && playerBufferState.videoElement && playerBufferState.videoElement !== videoEl) {
+                            playerBufferState.numSame = 0;
+                            playerBufferState.fixAttempts = 0;
+                            playerBufferState.recoveryReloadUsed = false;
+                        }
+                        playerBufferState.videoElement = videoEl;
                         const positionFrozen = (playerBufferState.position == position) &&
                             (playerBufferState.videoCurrentTime === undefined || playerBufferState.videoCurrentTime === videoCurrentTime);
                         if (playerNotActivelyPlaying) {
