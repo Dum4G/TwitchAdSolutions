@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v65.4.0 (2026-05-08)
+
+### Bug Fixes
+- **Pre-mute restore listener targeting wrong `<video>` element** — PR #189 (v64.1.0) added a pre-mute through hard reload to hide the MSE-teardown audio click, with the unmute restore wired via `v.addEventListener('canplay', restore, { once: true })` on the current `<video>` element and a 1500ms safety setTimeout backstop. But `setSrc({ isNewMediaPlayerInstance: true })` tears down MSE and Twitch creates a NEW `<video>` element — the canplay listener was on the now-detached original, so the event fired on the new element with no listener attached. Only the safety setTimeout restored unmute, which on slower MSE init (Edge especially) could land before the new element was attached/decoded, leaving the player muted until manually toggled. Field-reported on [#200](https://github.com/ryanbr/TwitchAdSolutions/issues/200) — Edge user on heavy SSAI-uniform channels (`fifakillvizualz`, `imnio`) reported "self-mute every few minutes" as every post-escape hard reload triggered the bug, requiring "unmute and mute and unmute" to recover audio (the classic Twitch-after-setSrc audio-state desync). Listen on `document` (capture phase) so the `canplay` event from any `<video>` element triggers the restore, plus an idempotent guard preventing the safety setTimeout from re-applying unmute if the listener already fired. Safety net bumped 1500ms → 2500ms for Edge/MSE-init slack (vaft + video-swap-new) (#201)
+
 ## v65.3.0 (2026-05-03)
 
 ### New Features
