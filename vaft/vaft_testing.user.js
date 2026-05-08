@@ -224,7 +224,8 @@
             const workerString = proto.toString();
             if (workerStringConflicts.some((x) => workerString.includes(x))) {
                 if (parent !== null) {
-                    Object.setPrototypeOf(parent, Object.getPrototypeOf(proto));
+                    // Foreign extension may have frozen Worker.prototype; per-link try-catch.
+                    try { Object.setPrototypeOf(parent, Object.getPrototypeOf(proto)); } catch {}
                 }
             } else {
                 if (root === null) {
@@ -251,7 +252,8 @@
     function reinsertWorkers(worker, reinsert) {
         let parent = worker;
         for (let i = 0; i < reinsert.length; i++) {
-            Object.setPrototypeOf(reinsert[i], parent);
+            // Per-link try-catch: foreign-frozen entry shouldn't abort the chain.
+            try { Object.setPrototypeOf(reinsert[i], parent); } catch {}
             parent = reinsert[i];
         }
         return parent;
