@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft-testing)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      632.0.0
+// @version      633.0.0
 // @description  Multiple solutions for blocking Twitch ads (vaft testing variant)
 // @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
 // @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 632;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 633;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1496,6 +1496,16 @@
                 if (!hadStrippedSegments) {
                     console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
                     streamInfo.IsUsingModifiedM3U8 = false;
+                    // Clear FastAutoplayFirstTry signal — stripped 0 proves no real SSAI was
+                    // delivered, regardless of how many Source-tier backups had markers at
+                    // probe time. Carrying the flag forward causes FastAutoplay to engage
+                    // on the next break, committing autoplay 360p first-try and forcing a
+                    // post-escape restore reload — visible loading circle on every break of
+                    // a CSAI-only-but-marked channel (emongg).
+                    if (streamInfo.LastBreakUsedEscapeHatch) {
+                        console.log('[AD DEBUG] Clearing LastBreakUsedEscapeHatch — break ended CSAI-only (stripped 0), no real SSAI confirmed');
+                        streamInfo.LastBreakUsedEscapeHatch = false;
+                    }
                     // autoplay (360p) commit MUST reload — autoplay-scoped access token only
                     // serves the 360p variant ladder. Source-tier backup with 0 stripped: no
                     // synthetic segments injected, no strip activity → no MSE drift to flush.
