@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft-testing)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      627.0.0
+// @version      628.0.0
 // @description  Multiple solutions for blocking Twitch ads (vaft testing variant)
 // @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
 // @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 627;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 628;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -62,7 +62,7 @@
         // prefixed so we don't re-introduce the PR #120 false-positive from bare
         // 'stitched' substring match. The specific twitch-stitched-ad DATERANGE
         // marker is a subset of this prefix.
-        scope.AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"'];
+        scope.AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"', 'EXT-X-DATERANGE:CLASS="twitch-trigger"'];// `twitch-trigger` added for testing soak — field logs (issue #200, mande / nicewigg / thatmartinkidtv) show this DATERANGE class consistently appearing in armed-break m3u8s before `stitched-ad` / `twitch-stitched` markers materialize, causing the hybrid skip path to never fire (site appears clean on poll 1 due to missing recognized signifiers, then dirty on poll 2). Adding it makes `hasAdTags` recognize ad m3u8s on the first poll, which lets the FastAutoplayFirstTry hybrid skip path fire as designed (~1s probe-loop savings on armed breaks). Risk: if `twitch-trigger` ever appears outside ad contexts, this would falsely flag clean content. Soak in testing first; promote to release if no false-positive reports.
         scope.AdSegmentURLPatterns = ['/adsquared/', '/_404/', '/processing'];
         // Precompiled regexes shared across the stripAdSegments hot path. Declared
         // here (serialized into the worker blob with declareOptions) so literals

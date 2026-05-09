@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 627;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 628;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -51,7 +51,7 @@ twitch-videoad.js text/javascript
         // prefixed so we don't re-introduce the PR #120 false-positive from bare
         // 'stitched' substring match. The specific twitch-stitched-ad DATERANGE
         // marker is a subset of this prefix.
-        scope.AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"'];
+        scope.AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"', 'EXT-X-DATERANGE:CLASS="twitch-trigger"'];// twitch-trigger added for testing soak — see vaft_testing.user.js for rationale.
         scope.AdSegmentURLPatterns = ['/adsquared/', '/_404/', '/processing'];
         // Precompiled regexes shared across the stripAdSegments hot path. Declared
         // here (serialized into the worker blob with declareOptions) so literals
