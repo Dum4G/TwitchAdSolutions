@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 633;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 632;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1480,13 +1480,6 @@ twitch-videoad.js text/javascript
                 if (!hadStrippedSegments) {
                     console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
                     streamInfo.IsUsingModifiedM3U8 = false;
-                    // Clear FastAutoplayFirstTry signal when CSAI-only — stripped 0 proves
-                    // no real SSAI was delivered. Prevents the flag from carrying forward and
-                    // causing FastAutoplay to commit autoplay 360p on the next break.
-                    if (streamInfo.LastBreakUsedEscapeHatch) {
-                        console.log('[AD DEBUG] Clearing LastBreakUsedEscapeHatch — break ended CSAI-only (stripped 0), no real SSAI confirmed');
-                        streamInfo.LastBreakUsedEscapeHatch = false;
-                    }
                     // autoplay (360p) commit MUST reload — autoplay-scoped access token only
                     // serves the 360p variant ladder. Source-tier backup with 0 stripped: no
                     // synthetic segments injected, no strip activity → no MSE drift to flush.
