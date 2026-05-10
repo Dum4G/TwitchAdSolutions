@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 630;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 631;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2179,8 +2179,16 @@ twitch-videoad.js text/javascript
         });
     }
     async function handleWorkerFetchRequest(fetchRequest) {
+        // 5s AbortController timeout — bounds worst-case wait when Twitch GQL hangs.
+        const controller = new AbortController();
+        const timeoutMs = 5000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const response = await window.realFetch(fetchRequest.url, fetchRequest.options);
+            const response = await window.realFetch(fetchRequest.url, {
+                ...fetchRequest.options,
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
             const responseBody = await response.text();
             const responseObject = {
                 id: fetchRequest.id,
@@ -2195,9 +2203,10 @@ twitch-videoad.js text/javascript
             };
             return responseObject;
         } catch (error) {
+            clearTimeout(timeoutId);
             return {
                 id: fetchRequest.id,
-                error: error.message
+                error: error.name === 'AbortError' ? 'GQL fetch timeout (' + (timeoutMs / 1000) + 's)' : error.message
             };
         }
     }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft-testing)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      630.0.0
+// @version      631.0.0
 // @description  Multiple solutions for blocking Twitch ads (vaft testing variant)
 // @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
 // @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/vaft_testing.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 630;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 631;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft-testing v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft-testing v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2201,8 +2201,16 @@
         });
     }
     async function handleWorkerFetchRequest(fetchRequest) {
+        // 5s AbortController timeout — bounds worst-case wait when Twitch GQL hangs.
+        const controller = new AbortController();
+        const timeoutMs = 5000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const response = await window.realFetch(fetchRequest.url, fetchRequest.options);
+            const response = await window.realFetch(fetchRequest.url, {
+                ...fetchRequest.options,
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
             const responseBody = await response.text();
             const responseObject = {
                 id: fetchRequest.id,
@@ -2217,9 +2225,10 @@
             };
             return responseObject;
         } catch (error) {
+            clearTimeout(timeoutId);
             return {
                 id: fetchRequest.id,
-                error: error.message
+                error: error.name === 'AbortError' ? 'GQL fetch timeout (' + (timeoutMs / 1000) + 's)' : error.message
             };
         }
     }
