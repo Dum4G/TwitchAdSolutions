@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft) — anon backup mod
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      72.1.0
-// @description  vaft with anonymous token: unauthorized 1080p stream at all times
+// @version      72.2.0
+// @description  vaft with anonymous backup token: authorized stream at all times, anonymous 1080p only during ads
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
 // @grant        none
@@ -23,7 +23,7 @@
     }
     'use strict';
     const ourTwitchAdSolutionsVersion = 72;
-    console.log('[AD] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' (anon-backup mod) loading');
+    console.log('[AD] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' (anon-backup mod v2) loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD] CONFLICT: skipped — another script already active (v' + window.twitchAdSolutionsVersion + ').');
         return;
@@ -51,7 +51,8 @@
         scope.BackupSwapFirst = true;
         scope.SkipPlayerReloadOnHevc = false;
         scope.AlwaysReloadPlayerOnAd = false;
-        scope.ReloadPlayerAfterAd = true;
+        // CHANGED: no reload after ad ends — we stay on the anonymous stream permanently
+        scope.ReloadPlayerAfterAd = false;
         scope.ReloadCooldownSeconds = 30;
         scope.DisableReloadCap = false;
         scope.DriftCorrectionRate = 1.1;
@@ -665,129 +666,114 @@
                 return textStr;
             }
 
-            // If all CDN nodes are in a universal ad-break state, skip expensive GQL+Usher
-            // requests — no new token will produce a clean stream until the break ends.
+            // If all CDN nodes are in a universal ad-break state, skip the GQL+Usher request.
             if (streamInfo.BackupGaveUp) {
                 if (IsAdStrippingEnabled) textStr = stripAdSegments(textStr, false, streamInfo);
                 postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: streamInfo.IsShowingAd, isStrippingAdSegments: streamInfo.IsStrippingAdSegments, numStrippedAdSegments: streamInfo.NumStrippedAdSegments, activeBackupPlayerType: null });
                 return textStr;
             }
 
-            // tStart declared here so it's in scope for all GQL/Usher timing logs below
             const tStart = Date.now();
 
-            let backupPlayerType = null, backupM3u8 = null, fallbackM3u8 = null;
-            const playerTypesToTry = [...BackupPlayerTypes];
-            if (streamInfo.PinnedBackupPlayerType) {
-                const pinnedIndex = playerTypesToTry.indexOf(streamInfo.PinnedBackupPlayerType);
-                if (pinnedIndex > 0) { playerTypesToTry.splice(pinnedIndex, 1); playerTypesToTry.unshift(streamInfo.PinnedBackupPlayerType); }
-            }
-            for (let playerTypeIndex = 0; !backupM3u8 && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
-                const playerType = playerTypesToTry[playerTypeIndex];
-                const failedAt = streamInfo.FailedBackupPlayerTypes.get(playerType);
-                if (failedAt && (Date.now() - failedAt) < 15000) continue;
-                for (let i = 0; i < 2; i++) {
-                    let isFreshM3u8 = false;
-                    let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
-                    if (!encodingsM3u8) {
-                        isFreshM3u8 = true;
-                        try {
-                            const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
-                            if (accessTokenResponse.status === 200) {
-                                const accessToken = await accessTokenResponse.json();
-                                const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
-                                if (spat) {
-                                    try {
-                                        const tok = JSON.parse(spat.value);
-                                        console.log('[VAFT-ANON] GQL response in ' + (Date.now() - tStart) + 'ms');
-                                        console.log('[VAFT-ANON] Token: user_ip=' + tok.user_ip + ' show_ads=' + tok.show_ads + ' max_res=' + tok.maximum_resolution + ' user_id=' + tok.user_id + ' expires=' + new Date(tok.expires * 1000).toISOString());
-                                    } catch(e) {}
-                                }
+            // --- SINGLE ATTEMPT: one player type ('site'), one try, no fallback loop ---
+            // We always get anonymous stream — there is no authorized fallback.
+            let backupPlayerType = null, backupM3u8 = null;
+            const playerType = BackupPlayerTypes[0]; // always 'site'
+
+            const failedAt = streamInfo.FailedBackupPlayerTypes.get(playerType);
+            if (!failedAt || (Date.now() - failedAt) >= 15000) {
+                let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
+                const isFreshM3u8 = !encodingsM3u8;
+                if (!encodingsM3u8) {
+                    try {
+                        const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
+                        if (accessTokenResponse.status === 200) {
+                            const accessToken = await accessTokenResponse.json();
+                            const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
+                            if (spat) {
+                                try {
+                                    const tok = JSON.parse(spat.value);
+                                    console.log('[VAFT-ANON] GQL response in ' + (Date.now() - tStart) + 'ms');
+                                    console.log('[VAFT-ANON] Token: user_ip=' + tok.user_ip + ' show_ads=' + tok.show_ads + ' max_res=' + tok.maximum_resolution + ' user_id=' + tok.user_id + ' expires=' + new Date(tok.expires * 1000).toISOString());
+                                } catch(e) {}
                                 if (!spat) {
                                     streamInfo.FailedBackupPlayerTypes.set(playerType, Date.now());
-                                    continue;
-                                }
-                                const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
-                                urlInfo.searchParams.set('sig', spat.signature);
-                                urlInfo.searchParams.set('token', spat.value);
-                                console.log('[VAFT-ANON] Usher URL: ' + urlInfo.href.replace(/token=[^&]+/, 'token=<redacted>'));
-                                const uStart = Date.now();
-                                const encodingsM3u8Response = await realFetch(urlInfo.href);
-                                if (encodingsM3u8Response.status === 200) {
-                                    encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
-                                    console.log('[VAFT-ANON] Usher response in ' + (Date.now() - uStart) + 'ms, status=' + encodingsM3u8Response.status);
-                                    // Log available qualities and codecs from backup encodings
-                                    const bLines = encodingsM3u8.split('\n');
-                                    const variants = [];
-                                    for (let bi = 0; bi < bLines.length - 1; bi++) {
-                                        if (bLines[bi].startsWith('#EXT-X-STREAM-INF')) {
-                                            const rm = bLines[bi].match(/RESOLUTION=([^,]+)/);
-                                            const cm = bLines[bi].match(/CODECS="([^"]+)"/);
-                                            const fm = bLines[bi].match(/FRAME-RATE=([^,]+)/);
-                                            if (rm) variants.push((rm[1]||'?') + '@' + (fm?fm[1]:'?') + 'fps ' + (cm?cm[1].split('.')[0]:'?'));
+                                } else {
+                                    const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
+                                    urlInfo.searchParams.set('sig', spat.signature);
+                                    urlInfo.searchParams.set('token', spat.value);
+                                    console.log('[VAFT-ANON] Usher URL: ' + urlInfo.href.replace(/token=[^&]+/, 'token=<redacted>'));
+                                    const uStart = Date.now();
+                                    const encodingsM3u8Response = await realFetch(urlInfo.href);
+                                    if (encodingsM3u8Response.status === 200) {
+                                        encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
+                                        console.log('[VAFT-ANON] Usher response in ' + (Date.now() - uStart) + 'ms');
+                                        const bLines = encodingsM3u8.split('\n');
+                                        const variants = [];
+                                        for (let bi = 0; bi < bLines.length - 1; bi++) {
+                                            if (bLines[bi].startsWith('#EXT-X-STREAM-INF')) {
+                                                const rm = bLines[bi].match(/RESOLUTION=([^,]+)/);
+                                                const cm = bLines[bi].match(/CODECS="([^"]+)"/);
+                                                const fm = bLines[bi].match(/FRAME-RATE=([^,]+)/);
+                                                if (rm) variants.push((rm[1]||'?') + '@' + (fm?fm[1]:'?') + 'fps ' + (cm?cm[1].split('.')[0]:'?'));
+                                            }
                                         }
+                                        console.log('[VAFT-ANON] Backup variants: [' + variants.join(', ') + ']');
                                     }
-                                    console.log('[VAFT-ANON] Backup variants: [' + variants.join(', ') + ']');
                                 }
                             } else {
                                 streamInfo.FailedBackupPlayerTypes.set(playerType, Date.now());
                             }
-                        } catch (err) {
-                            console.log('[AD] Token failed for ' + playerType + ': ' + err.message);
+                        } else {
                             streamInfo.FailedBackupPlayerTypes.set(playerType, Date.now());
                         }
+                    } catch (err) {
+                        console.log('[AD] Token failed for ' + playerType + ': ' + err.message);
+                        streamInfo.FailedBackupPlayerTypes.set(playerType, Date.now());
                     }
-                    if (encodingsM3u8) {
-                        try {
-                            const streamM3u8Url = getStreamUrlForResolution(encodingsM3u8, currentResolution);
-                            console.log('[VAFT-ANON] Selected backup URL: ' + streamM3u8Url);
-                            console.log('[VAFT-ANON] Wanted resolution: ' + currentResolution.Resolution + ' codecs: ' + currentResolution.Codecs);
-                            const mStart = Date.now();
-                            const streamM3u8Response = await realFetch(streamM3u8Url);
-                            if (streamM3u8Response.status == 200) {
-                                const m3u8Text = await streamM3u8Response.text();
-                                if (m3u8Text) {
-                                    const mLines = m3u8Text.split('\n');
-                                    const segs = mLines.filter(l => l.startsWith('#EXTINF'));
-                                    const liveSegs = segs.filter(l => l.includes(',live'));
-                                    const segUrls = mLines.filter(l => l.startsWith('https'));
-                                    const firstSeg = segUrls[0] || 'none';
-                                    console.log('[VAFT-ANON] Media playlist in ' + (Date.now() - mStart) + 'ms: ' + segs.length + ' segments (' + liveSegs.length + ' live), hasAdTags=' + hasAdTags(m3u8Text));
-                                    console.log('[VAFT-ANON] First segment: ' + firstSeg.split('/').slice(-2).join('/').split('?')[0]);
-                                    if (playerType == FallbackPlayerType) fallbackM3u8 = m3u8Text;
-                                    if (!hasAdTags(m3u8Text) || playerTypeIndex >= playerTypesToTry.length - 1) {
-                                        backupPlayerType = playerType;
-                                        backupM3u8 = m3u8Text;
-                                        break;
-                                    }
-                                }
+                }
+
+                if (encodingsM3u8) {
+                    try {
+                        const streamM3u8Url = getStreamUrlForResolution(encodingsM3u8, currentResolution);
+                        console.log('[VAFT-ANON] Selected backup URL: ' + streamM3u8Url);
+                        console.log('[VAFT-ANON] Wanted resolution: ' + currentResolution.Resolution + ' codecs: ' + currentResolution.Codecs);
+                        const mStart = Date.now();
+                        const streamM3u8Response = await realFetch(streamM3u8Url);
+                        if (streamM3u8Response.status == 200) {
+                            const m3u8Text = await streamM3u8Response.text();
+                            if (m3u8Text) {
+                                const mLines = m3u8Text.split('\n');
+                                const segs = mLines.filter(l => l.startsWith('#EXTINF'));
+                                const liveSegs = segs.filter(l => l.includes(',live'));
+                                const segUrls = mLines.filter(l => l.startsWith('https'));
+                                const firstSeg = segUrls[0] || 'none';
+                                console.log('[VAFT-ANON] Media playlist in ' + (Date.now() - mStart) + 'ms: ' + segs.length + ' segments (' + liveSegs.length + ' live), hasAdTags=' + hasAdTags(m3u8Text));
+                                console.log('[VAFT-ANON] First segment: ' + firstSeg.split('/').slice(-2).join('/').split('?')[0]);
+                                backupPlayerType = playerType;
+                                backupM3u8 = m3u8Text;
                             }
-                        } catch (err) {
-                            console.log('[AD] Backup stream error: ' + err.message);
                         }
+                    } catch (err) {
+                        console.log('[AD] Backup stream error: ' + err.message);
+                        // Invalidate cache on error so next poll fetches a fresh token
+                        streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
                     }
-                    streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
-                    if (isFreshM3u8) break;
                 }
             }
-            if (!backupM3u8 && fallbackM3u8) { backupPlayerType = FallbackPlayerType; backupM3u8 = fallbackM3u8; }
 
-            // If the backup playlist contains ad tags, the CDN is serving ads to all new
-            // sessions simultaneously. Invalidate cache so the next poll gets a fresh token.
-            // After 5 consecutive contaminated polls stop trying: the CDN is in a universal
-            // ad-break state and no new token will help until the break ends.
+            // If the backup playlist contains ad tags, the CDN is serving ads universally.
+            // Invalidate cache so next poll gets a fresh token.
+            // After 1 contaminated poll, stop trying: wait for the break to end.
             if (backupM3u8 && hasAdTags(backupM3u8)) {
                 streamInfo.BackupEncodingsM3U8Cache[backupPlayerType] = null;
                 streamInfo.BackupContaminationCount = (streamInfo.BackupContaminationCount || 0) + 1;
                 if (streamInfo.BackupContaminationCount >= 1 && !streamInfo.BackupGaveUp) {
                     streamInfo.BackupGaveUp = true;
-                    console.log('[VAFT-ANON] Backup consistently contaminated (' + streamInfo.BackupContaminationCount + 'x) — stripping only for rest of ad break');
-                } else if (!streamInfo.BackupGaveUp) {
-                    console.log('[VAFT-ANON] Backup contaminated (' + streamInfo.BackupContaminationCount + '/1) — retrying next poll');
+                    console.log('[VAFT-ANON] Backup contaminated — stripping only for rest of ad break');
                 }
                 backupM3u8 = null;
             } else if (backupM3u8) {
-                // Clean backup found — reset contamination counter.
                 streamInfo.BackupContaminationCount = 0;
                 streamInfo.BackupGaveUp = false;
             }
@@ -829,7 +815,7 @@
             const slowPathReady = streamInfo.PendingAdEndAt > 0 && elapsedSinceCandidate >= adEndMaxWaitMs;
             if (streamInfo.CleanPlaylistCount >= 3 || !hasLiveSegments || slowPathReady) {
                 const adBreakDurationSec = streamInfo.AdBreakStartedAt ? ((Date.now() - streamInfo.AdBreakStartedAt) / 1000).toFixed(1) : '?';
-                console.log('[AD] Finished blocking ads — duration: ' + adBreakDurationSec + 's. Reloading to restore authorized stream...');
+                console.log('[AD] Finished blocking ads — duration: ' + adBreakDurationSec + 's');
                 const hadStrippedSegments = streamInfo.NumStrippedAdSegments > 0;
                 if (!hadStrippedSegments && !streamInfo.HasConfirmedAdAttrs) {
                     streamInfo.ConsecutiveZeroStripBreaks++;
@@ -856,12 +842,12 @@
                 streamInfo.HasLoggedUnknownSignifiers = false;
                 streamInfo.BackupContaminationCount = 0;
                 streamInfo.BackupGaveUp = false;
-                // Hard reload with refreshAccessToken=true — Twitch will issue a new
-                // authorized token, restoring the full-quality subscribed stream (1440p etc.)
-                const shouldReload = streamInfo.IsUsingModifiedM3U8 || (ReloadPlayerAfterAd && hadStrippedSegments);
+                // ReloadPlayerAfterAd = false — we stay on the anonymous stream permanently.
+                // No setSrc/reload needed; just pause-resume to resync position.
+                const shouldReload = streamInfo.IsUsingModifiedM3U8;
                 streamInfo.IsUsingModifiedM3U8 = false;
-                if (shouldReload || streamInfo.LastCommittedBackupPlayerType) {
-                    if (!streamInfo.ReloadTimestamps) streamInfo.ReloadTimestamps = [];
+                if (shouldReload) {
+                    streamInfo.ReloadTimestamps = streamInfo.ReloadTimestamps || [];
                     streamInfo.ReloadTimestamps.push(Date.now());
                     streamInfo.LastPlayerReload = Date.now();
                     postMessage({ key: 'ReloadPlayer', kind: 'early' });
@@ -914,9 +900,8 @@
     }
 
     // Backup GQL request mirrors Xtra's loadStreamPlaybackAccessToken exactly:
-    // user Authorization (if captured) + mobile Client-ID + random X-Device-Id per request.
-    // The random device ID prevents "Commercial break in progress".
-    // Authorization allows Twitch to resolve user entitlements (sub, Turbo, etc.).
+    // mobile Client-ID + random X-Device-Id per request (prevents "Commercial break in progress").
+    // Authorization forwarded so Twitch can resolve user entitlements if available.
     function gqlRequest(body, playerType) {
         const MOBILE_CLIENT_ID = 'kd1unb4b3q4t58fwlpcbzcbnm76a8fp';
         // Random UUID-style device ID — same format as Xtra (32 hex chars, no dashes)
@@ -932,8 +917,6 @@
             'Client-ID': MOBILE_CLIENT_ID,
             'X-Device-Id': deviceId
         };
-        // Include the user's Authorization header if available — same as Xtra does.
-        // Without it user_id=null and Twitch cannot apply subscription/entitlement ad rules.
         if (AuthorizationHeader) headers['Authorization'] = AuthorizationHeader;
         return new Promise((resolve, reject) => {
             const requestId = Math.random().toString(36).substring(2, 15);
@@ -956,8 +939,8 @@
 
     // Tracks anonymous initial stream load per channel.
     // On first load for a channel we use mobile client ID + no auth to skip preroll,
-    // then reload with the real authorized token once the stream is confirmed playing.
-    const initialLoadState = { channelName: null, reloadTimer: null };
+    // then let the stream play — no reload back to authorized is performed.
+    const initialLoadState = { channelName: null };
 
     function startDriftCorrection(videoElement) {
         if (DriftCorrectionRate <= 1) return;
@@ -1229,9 +1212,8 @@
                     }
                 } catch {}
             }
-            // refreshAccessToken: true — Twitch issues a new authorized GQL request,
-            // restoring the full-quality subscribed stream after the ad break
-            playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: hardReload });
+            // refreshAccessToken: false — we stay on the anonymous stream, no new GQL request needed.
+            playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: false });
             postTwitchWorkerMessage('TriggeredPlayerReload');
             player.play()?.catch?.(() => {});
             setTimeout(() => {
@@ -1274,7 +1256,7 @@
         window.realFetch = realFetch;
         window.fetch = maskAsNative(function(url, init, ...args) {
             if (typeof url === 'string' && url.includes('gql') && init?.headers) {
-                // Capture session headers for the worker (used for non-backup GQL requests)
+                // Capture session headers for the worker
                 let deviceId = init.headers['X-Device-Id'] || init.headers['Device-ID'];
                 if (typeof deviceId === 'string' && GQLDeviceID != deviceId) {
                     GQLDeviceID = deviceId;
@@ -1308,36 +1290,36 @@
                     if (_channelName && _channelName !== initialLoadState.channelName) {
                         // New channel — reset initial load state.
                         initialLoadState.channelName = _channelName;
-                        if (initialLoadState.reloadTimer) { clearTimeout(initialLoadState.reloadTimer); initialLoadState.reloadTimer = null; }
                         initialLoadState.done = false;
                     }
 
                     if (!initialLoadState.done) {
                         // First token request for this channel: go anonymous to skip preroll.
-                        // Mirrors Xtra's anonymous/fresh-install flow:
-                        // mobile Client-ID + no Authorization + random device ID.
+                        // Mirrors Xtra's flow: mobile Client-ID + no Authorization + random device ID.
+                        // The stream plays immediately without any reload — no switch back to authorized.
                         initialLoadState.done = true;
-                        // Replace Client-Id/Client-ID with mobile client ID regardless of case.
-                        // Must delete the original key first — adding a new casing makes a duplicate → 400.
                         const _clientIdKey = Object.keys(init.headers).find(k => k.toLowerCase() === 'client-id');
                         if (_clientIdKey) delete init.headers[_clientIdKey];
                         init.headers['Client-Id'] = 'kd1unb4b3q4t58fwlpcbzcbnm76a8fp';
-                        // Remove Authorization and any integrity headers that are invalid without auth.
+                        // Remove Authorization and any integrity headers
                         for (const k of Object.keys(init.headers)) {
                             const kl = k.toLowerCase();
                             if (kl === 'authorization' || kl === 'client-integrity') delete init.headers[k];
                         }
-                        console.log('[AD] Initial load for ' + _channelName + ' — anonymous token to skip preroll');
-                        // After 15s of clean playback reload with the real authorized token.
-                        // By then the preroll window has passed and the authorized stream
-                        // will not be assigned a new preroll for the same session.
-                        initialLoadState.reloadTimer = setTimeout(() => {
-                            initialLoadState.reloadTimer = null;
-                            if (!playerBufferState.inAdBreak) {
-                                console.log('[AD] Switching to authorized stream after anonymous start');
-                                doTwitchPlayerTask(false, true, 'early');
-                            }
-                        }, 15000);
+                        console.log('[AD] Initial load for ' + _channelName + ' — anonymous token to skip preroll (permanent, no reload)');
+
+                        // --- COMMENTED OUT: reload back to authorized stream ---
+                        // The anonymous stream plays fine indefinitely. A reload causes 20-25s
+                        // buffering because isNewMediaPlayerInstance:true destroys and rebuilds
+                        // the entire player. Xtra never does this reload either.
+                        //
+                        // initialLoadState.reloadTimer = setTimeout(() => {
+                        //     initialLoadState.reloadTimer = null;
+                        //     if (!playerBufferState.inAdBreak) {
+                        //         console.log('[AD] Switching to authorized stream after anonymous start');
+                        //         doTwitchPlayerTask(false, true, 'early');
+                        //     }
+                        // }, 15000);
                     }
                 }
             }
@@ -1377,7 +1359,7 @@
     }
 
     declareOptions(window);
-    console.log('[AD] Mode: authorized main stream + mobile-client-ID backup during ads (show_ads=false)');
+    console.log('[AD] Mode: anonymous stream (mobile client-ID, no reload) — preroll skipped immediately');
     hookWindowWorker();
     hookFetch();
     const realXHROpen = XMLHttpRequest.prototype.open;
