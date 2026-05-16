@@ -31,7 +31,7 @@
     window.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
 
     function declareOptions(scope) {
-        scope.AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"'];
+        scope.AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT:DURATION', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"'];
         scope.AdSegmentURLPatterns = ['/adsquared/', '/_404/', '/processing'];
         scope.TwitchAdUrlRewriteRegex = /(X-TV-TWITCH-AD(?:-[A-Z]+)*-URLS?=")[^"]*(")/g;
         scope.UriAttributeRegex = /URI="([^"]+)"/;
@@ -99,7 +99,7 @@
 
     function createStreamInfo(channelName, encodingsM3u8, usherParams) {
         return {
-            ChannelName: channelName, LastSeenAt: Date.now(), EncodingsM3U8: encodingsM3u8, UsherParams: usherParams,
+            ChannelName: channelName, CreatedAt: Date.now(), LastSeenAt: Date.now(), EncodingsM3U8: encodingsM3u8, UsherParams: usherParams,
             Urls: Object.create(null), ResolutionList: [], RequestedAds: new Set(),
             ModifiedM3U8: null, IsUsingModifiedM3U8: false,
             IsShowingAd: false, IsMidroll: false, AdBreakStartedAt: 0, PodLength: 1,
@@ -668,6 +668,21 @@
 
             // If all CDN nodes are in a universal ad-break state, skip the GQL+Usher request.
             if (streamInfo.BackupGaveUp) {
+                if (IsAdStrippingEnabled) textStr = stripAdSegments(textStr, false, streamInfo);
+                postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: streamInfo.IsShowingAd, isStrippingAdSegments: streamInfo.IsStrippingAdSegments, numStrippedAdSegments: streamInfo.NumStrippedAdSegments, activeBackupPlayerType: null });
+                return textStr;
+            }
+
+            // Startup grace period: for the first 5s after stream info is created,
+            // skip the expensive async GQL+Usher backup fetch entirely.
+            // processM3U8 runs inside an awaited fetch() — the player blocks waiting for
+            // the m3u8 response. A GQL+Usher round-trip here (500-2000ms) causes the
+            // buffering hang on initial load. We are already on an anonymous stream
+            // (show_ads=false), so ad tags in the first few polls are stale CDN artifacts
+            // — just strip segments and return immediately without blocking the player.
+            const startupGraceMs = 5000;
+            if (streamInfo.CreatedAt && (Date.now() - streamInfo.CreatedAt) < startupGraceMs) {
+                console.log('[VAFT-ANON] Startup grace (' + Math.round((Date.now() - streamInfo.CreatedAt) / 1000) + 's) — stripping only, skipping backup fetch');
                 if (IsAdStrippingEnabled) textStr = stripAdSegments(textStr, false, streamInfo);
                 postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: streamInfo.IsShowingAd, isStrippingAdSegments: streamInfo.IsStrippingAdSegments, numStrippedAdSegments: streamInfo.NumStrippedAdSegments, activeBackupPlayerType: null });
                 return textStr;
