@@ -39,15 +39,15 @@
 
         // --- KEY SETTINGS ---
         // Single backup type: anonymous request with 'site' — Twitch returns 1080p without ads
-        scope.BackupPlayerTypes = ['site'];
-        scope.FallbackPlayerType = 'site';
+        scope.BackupPlayerTypes = 'mobile_web';
+        scope.FallbackPlayerType = ['site', 'popout', 'mobile_web', 'embed'];
         // Leave the main authorized token request untouched — Twitch handles it natively
         scope.ForceAccessTokenPlayerType = '';
         // No need for 360p fallback — anonymous backup provides 1080p
         scope.PreferLowQualityBackup = false;
         // --------------------
 
-        scope.FastAutoplayFirstTry = false;
+        scope.FastAutoplayFirstTry = true;
         scope.BackupSwapFirst = true;
         scope.SkipPlayerReloadOnHevc = false;
         scope.AlwaysReloadPlayerOnAd = false;
@@ -56,7 +56,7 @@
         scope.ReloadCooldownSeconds = 30;
         scope.DisableReloadCap = false;
         scope.DriftCorrectionRate = 1.1;
-        scope.EarlyReloadPollThreshold = 3;
+        scope.EarlyReloadPollThreshold = 0; // disabled — permanent anonymous stream, reloads cause buffering
         scope.PinBackupPlayerType = true;
         scope.PlayerReloadMinimalRequestsTime = 1500;
         scope.PlayerReloadMinimalRequestsPlayerIndex = 2;
@@ -82,6 +82,37 @@
         scope.AdSegmentCache = new Map();
         scope.AllSegmentsAreAdSegments = false;
         scope.StreamInfoMaxAgeMs = 30 * 60 * 1000;
+    }
+
+    // Pre-fetch the anonymous backup encodings M3U8 as soon as a new stream is
+    // detected, before any ad is seen. Mirrors Xtra's approach: the anonymous
+    // token is obtained upfront so that when processM3U8 detects a preroll the
+    // BackupEncodingsM3U8Cache is already warm → zero GQL+Usher delay on first ad.
+    async function prefetchBackupToken(streamInfo, realFetch) {
+        const playerType = 'site';
+        try {
+            console.log('[VAFT-ANON] Prefetching anonymous backup token for ' + streamInfo.ChannelName);
+            const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
+            if (accessTokenResponse.status !== 200) return;
+            const accessToken = await accessTokenResponse.json();
+            const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
+            if (!spat) return;
+            try {
+                const tok = JSON.parse(spat.value);
+                console.log('[VAFT-ANON] Prefetch token: show_ads=' + tok.show_ads + ' max_res=' + tok.maximum_resolution);
+                if (tok.show_ads) { console.log('[VAFT-ANON] Prefetch: show_ads=true, discarding'); return; }
+            } catch(e) {}
+            const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
+            urlInfo.searchParams.set('sig', spat.signature);
+            urlInfo.searchParams.set('token', spat.value);
+            const resp = await realFetch(urlInfo.href);
+            if (resp.status === 200) {
+                streamInfo.BackupEncodingsM3U8Cache[playerType] = await resp.text();
+                console.log('[VAFT-ANON] Prefetch complete — backup encodings cached');
+            }
+        } catch(err) {
+            console.log('[VAFT-ANON] Prefetch failed: ' + err.message);
+        }
     }
 
     function pruneStreamInfos() {
@@ -214,6 +245,7 @@
                     ${getWasmWorkerJs.toString()}
                     ${getServerTimeFromM3u8.toString()}
                     ${replaceServerTimeInM3u8.toString()}
+                    ${prefetchBackupToken.toString()}
                     ${pruneStreamInfos.toString()}
                     ${createStreamInfo.toString()}
                     const workerString = getWasmWorkerJs('${twitchBlobUrl.replaceAll("'", "%27")}');
@@ -361,6 +393,9 @@
                                 if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
                                     HasTriggeredPlayerReload = false;
                                     StreamInfos[channelName] = streamInfo = createStreamInfo(channelName, encodingsM3u8, parsedUrl.search);
+                                    // Fire prefetch immediately — non-blocking, warms the backup cache
+                                    // before the first preroll poll arrives in processM3U8.
+                                    prefetchBackupToken(streamInfo, realFetch);
                                     const lines = encodingsM3u8.split('\n');
                                     for (let i = 0; i < lines.length - 1; i++) {
                                         if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('.m3u8')) {
@@ -622,10 +657,20 @@
                 streamInfo.LastCommittedBackupPlayerType = null;
                 streamInfo.FreezeStartedAt = 0;
                 streamInfo.CsaiOnlyThisBreak = false;
+                // For midroll: invalidate the prefetched encodings cache so we fetch a
+                // fresh backup token. The prefetch from stream start may have stale URLs.
+                if (streamInfo.IsMidroll) {
+                    streamInfo.BackupEncodingsM3U8Cache = [];
+                    console.log('[VAFT-ANON] Midroll detected — invalidated backup cache for fresh token');
+                }
                 console.log('[AD] Ad detected — ' + (streamInfo.IsMidroll ? 'midroll' : 'preroll') + ', fetching backup token (mobile client)...');
                 postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: true, isStrippingAdSegments: false });
             }
-            if (!streamInfo.IsMidroll) {
+            // Consume ad segments from the original stream in the background —
+            // this keeps the CDN moving forward so ad markers clear in ~20-25s
+            // (matching native preroll duration) instead of 45-60s.
+            // Applied to both preroll and midroll.
+            {
                 const lines = textStr.split(/\r?\n/);
                 for (let i = 0; i < lines.length; i++) {
                     const line = lines[i];
@@ -636,10 +681,18 @@
                     }
                 }
             }
-            const currentResolution = streamInfo.Urls[url];
+            let currentResolution = streamInfo.Urls[url];
             if (!currentResolution) {
-                console.log('[AD] Missing resolution info for ' + url);
-                return stripAdSegments(textStr, false, streamInfo);
+                // URL not in streamInfo.Urls — we're on the backup stream (e.g. midroll
+                // after preroll backup). Fall back to the best non-HEVC resolution so we
+                // can still fetch a fresh backup instead of giving up and stripping.
+                const nonHevc = streamInfo.ResolutionList.filter(r => !r.Codecs.startsWith('hev') && !r.Codecs.startsWith('hvc'));
+                currentResolution = nonHevc.length > 0 ? nonHevc[nonHevc.length - 1] : streamInfo.ResolutionList[streamInfo.ResolutionList.length - 1];
+                if (!currentResolution) {
+                    console.log('[AD] Missing resolution info and empty ResolutionList for ' + url);
+                    return stripAdSegments(textStr, false, streamInfo);
+                }
+                console.log('[AD] Backup URL — using fallback resolution ' + currentResolution.Resolution);
             }
             const isHevc = currentResolution.Codecs.startsWith('hev') || currentResolution.Codecs.startsWith('hvc');
             const postAdReentryGuardMs = 8000;
@@ -668,6 +721,13 @@
 
             // If all CDN nodes are in a universal ad-break state, skip the GQL+Usher request.
             if (streamInfo.BackupGaveUp) {
+                if (streamInfo.IsMidroll) {
+                    // For midroll: don't strip when backup fails — pass the stream through
+                    // unmodified so the ad plays. A frozen player (from BLANK_MP4 decoder
+                    // errors) is worse UX than seeing a single midroll ad.
+                    postMessage({ key: 'UpdateAdBlockBanner', isMidroll: true, hasAds: true, isStrippingAdSegments: false, numStrippedAdSegments: 0, activeBackupPlayerType: null });
+                    return textStr;
+                }
                 if (IsAdStrippingEnabled) textStr = stripAdSegments(textStr, false, streamInfo);
                 postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: streamInfo.IsShowingAd, isStrippingAdSegments: streamInfo.IsStrippingAdSegments, numStrippedAdSegments: streamInfo.NumStrippedAdSegments, activeBackupPlayerType: null });
                 return textStr;
@@ -680,9 +740,13 @@
             // buffering hang on initial load. We are already on an anonymous stream
             // (show_ads=false), so ad tags in the first few polls are stale CDN artifacts
             // — just strip segments and return immediately without blocking the player.
-            const startupGraceMs = 5000;
+            // Also reset ConsecutiveAllStrippedPolls so it doesn't accumulate during grace
+            // and fire EarlyReload immediately after the grace window closes.
+            const startupGraceMs = 2000; // short — backup token is prefetched, cache is warm
             if (streamInfo.CreatedAt && (Date.now() - streamInfo.CreatedAt) < startupGraceMs) {
                 console.log('[VAFT-ANON] Startup grace (' + Math.round((Date.now() - streamInfo.CreatedAt) / 1000) + 's) — stripping only, skipping backup fetch');
+                streamInfo.ConsecutiveAllStrippedPolls = 0;
+                streamInfo.TotalAllStrippedPolls = 0;
                 if (IsAdStrippingEnabled) textStr = stripAdSegments(textStr, false, streamInfo);
                 postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: streamInfo.IsShowingAd, isStrippingAdSegments: streamInfo.IsStrippingAdSegments, numStrippedAdSegments: streamInfo.NumStrippedAdSegments, activeBackupPlayerType: null });
                 return textStr;
@@ -796,6 +860,18 @@
             if (backupM3u8 && streamInfo.IsShowingAd) {
                 textStr = backupM3u8;
                 streamInfo.LastCommittedBackupPlayerType = backupPlayerType;
+                // Register the backup media URL in StreamInfosByUrl so that future
+                // processM3U8 calls on this URL (e.g. midroll) can find the streamInfo.
+                try {
+                    const backupLines = backupM3u8.split('\n');
+                    // The backup URL we fetched is in the encodings for this playerType
+                    const backupMediaUrl = streamInfo.BackupEncodingsM3U8Cache[backupPlayerType]
+                        ? getStreamUrlForResolution(streamInfo.BackupEncodingsM3U8Cache[backupPlayerType], currentResolution)
+                        : null;
+                    if (backupMediaUrl && !StreamInfosByUrl[backupMediaUrl]) {
+                        StreamInfosByUrl[backupMediaUrl] = streamInfo;
+                    }
+                } catch(_) {}
                 if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
                     streamInfo.ActiveBackupPlayerType = backupPlayerType;
                     if (PinBackupPlayerType) streamInfo.PinnedBackupPlayerType = backupPlayerType;
@@ -857,8 +933,9 @@
                 streamInfo.HasLoggedUnknownSignifiers = false;
                 streamInfo.BackupContaminationCount = 0;
                 streamInfo.BackupGaveUp = false;
-                // ReloadPlayerAfterAd = false — we stay on the anonymous stream permanently.
-                // No setSrc/reload needed; just pause-resume to resync position.
+                // Permanent anonymous stream — do NOT touch the player at ad-end.
+                // Backup is already playing cleanly; PauseResumePlayer would interrupt it.
+                // Only reload if HEVC codec swap was active (ModifiedM3U8).
                 const shouldReload = streamInfo.IsUsingModifiedM3U8;
                 streamInfo.IsUsingModifiedM3U8 = false;
                 if (shouldReload) {
@@ -866,9 +943,8 @@
                     streamInfo.ReloadTimestamps.push(Date.now());
                     streamInfo.LastPlayerReload = Date.now();
                     postMessage({ key: 'ReloadPlayer', kind: 'early' });
-                } else {
-                    postMessage({ key: 'PauseResumePlayer' });
                 }
+                // No PauseResumePlayer — backup stream is already playing, leave it alone.
             }
         }
         postMessage({
@@ -932,7 +1008,9 @@
             'Client-ID': MOBILE_CLIENT_ID,
             'X-Device-Id': deviceId
         };
-        if (AuthorizationHeader) headers['Authorization'] = AuthorizationHeader;
+        // DO NOT send Authorization — backup must be anonymous.
+        // When Authorization is present, Twitch resolves the user account and sets show_ads=true.
+        // Without it, Twitch treats the request as a fresh anonymous session → show_ads=false.
         return new Promise((resolve, reject) => {
             const requestId = Math.random().toString(36).substring(2, 15);
             const fetchRequest = {
@@ -1290,14 +1368,6 @@
                     init.body = '';
                 // Handle every PlaybackAccessToken request (skip picture-by-picture).
                 if (typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && !init.body.includes('picture-by-picture')) {
-                    // Always inject a fresh random X-Device-Id — same format as Xtra (32 hex chars).
-                    // Prevents "Commercial break in progress" on every session.
-                    const randomId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-                        .map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 32);
-                    if ('X-Device-Id' in init.headers) init.headers['X-Device-Id'] = randomId;
-                    else if ('Device-ID' in init.headers) init.headers['Device-ID'] = randomId;
-                    else init.headers['X-Device-Id'] = randomId;
-
                     // Detect channel name from request body to track per-channel initial load.
                     let _channelName = null;
                     try { _channelName = JSON.parse(init.body)?.variables?.login || null; } catch {}
@@ -1313,15 +1383,13 @@
                         // Mirrors Xtra's flow: mobile Client-ID + no Authorization + random device ID.
                         // The stream plays immediately without any reload — no switch back to authorized.
                         initialLoadState.done = true;
-                        const _clientIdKey = Object.keys(init.headers).find(k => k.toLowerCase() === 'client-id');
-                        if (_clientIdKey) delete init.headers[_clientIdKey];
-                        init.headers['Client-Id'] = 'kd1unb4b3q4t58fwlpcbzcbnm76a8fp';
-                        // Remove Authorization and any integrity headers
-                        for (const k of Object.keys(init.headers)) {
-                            const kl = k.toLowerCase();
-                            if (kl === 'authorization' || kl === 'client-integrity') delete init.headers[k];
-                        }
-                        console.log('[AD] Initial load for ' + _channelName + ' — anonymous token to skip preroll (permanent, no reload)');
+                        // Keep the original web Client-ID and Authorization intact.
+                        // Swapping to mobile client-id causes 400 from Twitch web GQL endpoint
+                        // when used from a browser context.
+                        // A fresh random X-Device-Id is sufficient: Twitch treats this as a new
+                        // session and does not carry over preroll assignment from previous loads.
+                        // (randomId was already injected above for ALL PlaybackAccessToken requests)
+                        console.log('[AD] Initial load for ' + _channelName + ' — fresh device-id to skip preroll (no client-id swap)');
 
                         // --- COMMENTED OUT: reload back to authorized stream ---
                         // The anonymous stream plays fine indefinitely. A reload causes 20-25s
