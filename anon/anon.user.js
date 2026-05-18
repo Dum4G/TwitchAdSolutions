@@ -146,7 +146,7 @@
             EscapeHatchFired: false, LastBreakUsedEscapeHatch: false,
             LastPlayerReload: 0, ReloadTimestamps: [],
             HasCheckedUnknownTags: false, HasLoggedAdAttributes: false, HasLoggedUnknownSignifiers: false,
-            BackupContaminationCount: 0, BackupGaveUp: false, BackupPlayingAt: 0,
+            BackupContaminationCount: 0, BackupGaveUp: false,
         };
     }
 
@@ -307,7 +307,6 @@
                                     si.IsStrippingAdSegments = false;
                                     si.NumStrippedAdSegments = 0;
                                     si.ActiveBackupPlayerType = null;
-                                    si.BackupPlayingAt = 0;
                                     si.CleanPlaylistCount = 0;
                                     si.ConsecutiveAllStrippedPolls = 0;
                                     si.TotalAllStrippedPolls = 0;
@@ -875,7 +874,6 @@
             } else if (backupM3u8) {
                 streamInfo.BackupContaminationCount = 0;
                 streamInfo.BackupGaveUp = false;
-                streamInfo.BackupPlayingAt = 0;
             }
 
             if (backupM3u8 && streamInfo.IsShowingAd) {
@@ -896,48 +894,12 @@
                     if (PinBackupPlayerType) streamInfo.PinnedBackupPlayerType = backupPlayerType;
                     console.log('[AD] Blocking' + (streamInfo.IsMidroll ? ' midroll' : '') + ' ads — backup found in ' + (Date.now() - tStart) + 'ms');
                 }
-                // Track when backup was first committed to the player.
-                if (!streamInfo.BackupPlayingAt) {
-                    streamInfo.BackupPlayingAt = Date.now();
-                    console.log('[AD] Backup committed — user will see stream in ~2-3s');
-                }
-                // Once backup has been playing cleanly for >4s, the user is watching the
-                // stream. Don't wait for the original stream to clear its ad tags (can take
-                // 20-50s extra). Clear IsShowingAd now — ReloadPlayerAfterAd=false means
-                // we stay on the backup stream regardless.
-                const backupAge = Date.now() - streamInfo.BackupPlayingAt;
-                if (backupAge > 4000 && !hasAdTags(textStr)) {
-                    const adDurationSec = streamInfo.AdBreakStartedAt
-                        ? ((Date.now() - streamInfo.AdBreakStartedAt) / 1000).toFixed(1) : '?';
-                    console.log('[AD] Backup playing cleanly for ' + (backupAge/1000).toFixed(1) + 's — clearing ad state (total: ' + adDurationSec + 's)');
-                    streamInfo.IsShowingAd = false;
-                    streamInfo.IsStrippingAdSegments = false;
-                    streamInfo.NumStrippedAdSegments = 0;
-                    streamInfo.ActiveBackupPlayerType = null;
-                    streamInfo.BackupPlayingAt = 0;
-                    streamInfo.CleanPlaylistCount = 0;
-                    streamInfo.ConsecutiveAllStrippedPolls = 0;
-                    streamInfo.TotalAllStrippedPolls = 0;
-                    streamInfo.RequestedAds?.clear?.();
-                    postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: false, isStrippingAdSegments: false, numStrippedAdSegments: 0, activeBackupPlayerType: null });
-                    return textStr;
-                }
+
             } else if (!backupM3u8 && !streamInfo.BackupGaveUp) {
                 console.log('[AD] No backup found — stripping segments');
             }
             const stripHevc = isHevc && streamInfo.ModifiedM3U8;
-            // When backup is committed (backupM3u8 is non-null → already verified clean),
-            // skip stripAdSegments entirely. Calling it on backup content would add backup
-            // segment URLs to AdSegmentCache → player gets BLANK_MP4 for every segment
-            // → AVC errors + false "stripping" state. Only strip when serving the original
-            // ad-laden stream (no backup found or backup gave up).
-            if ((IsAdStrippingEnabled || stripHevc) && !backupM3u8) {
-                textStr = stripAdSegments(textStr, stripHevc, streamInfo);
-            } else if (backupM3u8) {
-                // Backup is playing — mark as not stripping
-                streamInfo.IsStrippingAdSegments = false;
-                streamInfo.NumStrippedAdSegments = 0;
-            }
+            if (IsAdStrippingEnabled || stripHevc) textStr = stripAdSegments(textStr, stripHevc, streamInfo);
             if (streamInfo.EarlyReloadAwaitingResult) {
                 streamInfo.EarlyReloadAwaitingResult = false;
                 if (!streamInfo.IsStrippingAdSegments) streamInfo.EarlyReloadTriggered = false;
@@ -1443,31 +1405,9 @@
                     }
 
                     if (!initialLoadState.done) {
-                        // First token request for this channel: go anonymous to skip preroll.
-                        // Mirrors Xtra's flow: mobile Client-ID + no Authorization + random device ID.
-                        // The stream plays immediately without any reload — no switch back to authorized.
                         initialLoadState.done = true;
-                        // Keep the original web Client-ID and Authorization intact.
-                        // Swapping to mobile client-id causes 400 from Twitch web GQL endpoint
-                        // when used from a browser context.
-                        // A fresh random X-Device-Id is sufficient: Twitch treats this as a new
-                        // session and does not carry over preroll assignment from previous loads.
-                        // (randomId was already injected above for ALL PlaybackAccessToken requests)
                         console.log('[AD] Initial load for ' + _channelName + ' — fresh device-id to skip preroll (no client-id swap)');
                     }
-
-                        // --- COMMENTED OUT: reload back to authorized stream ---
-                        // The anonymous stream plays fine indefinitely. A reload causes 20-25s
-                        // buffering because isNewMediaPlayerInstance:true destroys and rebuilds
-                        // the entire player. Xtra never does this reload either.
-                        //
-                        // initialLoadState.reloadTimer = setTimeout(() => {
-                        //     initialLoadState.reloadTimer = null;
-                        //     if (!playerBufferState.inAdBreak) {
-                        //         console.log('[AD] Switching to authorized stream after anonymous start');
-                        //         doTwitchPlayerTask(false, true, 'early');
-                        //     }
-                        // }, 15000);                    
                 }
             }
             if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
