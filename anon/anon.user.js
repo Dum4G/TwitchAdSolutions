@@ -39,15 +39,15 @@
 
         // --- KEY SETTINGS ---
         // Single backup type: anonymous request with 'site' — Twitch returns 1080p without ads
-        scope.BackupPlayerTypes = 'mobile_web';
-        scope.FallbackPlayerType = ['site', 'popout', 'mobile_web', 'embed'];
+        scope.BackupPlayerTypes = ['site'];
+        scope.FallbackPlayerType = 'site';
         // Leave the main authorized token request untouched — Twitch handles it natively
         scope.ForceAccessTokenPlayerType = '';
         // No need for 360p fallback — anonymous backup provides 1080p
         scope.PreferLowQualityBackup = false;
         // --------------------
 
-        scope.FastAutoplayFirstTry = true;
+        scope.FastAutoplayFirstTry = false;
         scope.BackupSwapFirst = true;
         scope.SkipPlayerReloadOnHevc = false;
         scope.AlwaysReloadPlayerOnAd = false;
@@ -146,7 +146,7 @@
             EscapeHatchFired: false, LastBreakUsedEscapeHatch: false,
             LastPlayerReload: 0, ReloadTimestamps: [],
             HasCheckedUnknownTags: false, HasLoggedAdAttributes: false, HasLoggedUnknownSignifiers: false,
-            BackupContaminationCount: 0, BackupGaveUp: false,
+            BackupContaminationCount: 0, BackupGaveUp: false, BackupPlayingAt: 0,
         };
     }
 
@@ -297,6 +297,26 @@
                         } else if (e.data.key == 'TriggeredPlayerReload') { HasTriggeredPlayerReload = true; }
                         else if (e.data.key == 'SimulateAds') { SimulatedAdsDepth = e.data.value; }
                         else if (e.data.key == 'AllSegmentsAreAdSegments') { AllSegmentsAreAdSegments = !AllSegmentsAreAdSegments; }
+                        else if (e.data.key == 'NativeTokenRequest') {
+                            for (const ch in StreamInfos) {
+                                const si = StreamInfos[ch];
+                                if (si && si.IsShowingAd) {
+                                    const dur = si.AdBreakStartedAt ? ((Date.now() - si.AdBreakStartedAt) / 1000).toFixed(1) : '?';
+                                    console.log('[AD] Native token request — stream starting, clearing ad state after ' + dur + 's');
+                                    si.IsShowingAd = false;
+                                    si.IsStrippingAdSegments = false;
+                                    si.NumStrippedAdSegments = 0;
+                                    si.ActiveBackupPlayerType = null;
+                                    si.BackupPlayingAt = 0;
+                                    si.CleanPlaylistCount = 0;
+                                    si.ConsecutiveAllStrippedPolls = 0;
+                                    si.TotalAllStrippedPolls = 0;
+                                    si.PendingAdEndAt = 0;
+                                    si.RequestedAds?.clear?.();
+                                }
+                            }
+                            postMessage({ key: 'UpdateAdBlockBanner', hasAds: false, isStrippingAdSegments: false, numStrippedAdSegments: 0 });
+                        }
                     });
                     hookWorkerFetch();
                     eval(workerString);
@@ -855,6 +875,7 @@
             } else if (backupM3u8) {
                 streamInfo.BackupContaminationCount = 0;
                 streamInfo.BackupGaveUp = false;
+                streamInfo.BackupPlayingAt = 0;
             }
 
             if (backupM3u8 && streamInfo.IsShowingAd) {
@@ -863,8 +884,6 @@
                 // Register the backup media URL in StreamInfosByUrl so that future
                 // processM3U8 calls on this URL (e.g. midroll) can find the streamInfo.
                 try {
-                    const backupLines = backupM3u8.split('\n');
-                    // The backup URL we fetched is in the encodings for this playerType
                     const backupMediaUrl = streamInfo.BackupEncodingsM3U8Cache[backupPlayerType]
                         ? getStreamUrlForResolution(streamInfo.BackupEncodingsM3U8Cache[backupPlayerType], currentResolution)
                         : null;
@@ -877,11 +896,48 @@
                     if (PinBackupPlayerType) streamInfo.PinnedBackupPlayerType = backupPlayerType;
                     console.log('[AD] Blocking' + (streamInfo.IsMidroll ? ' midroll' : '') + ' ads — backup found in ' + (Date.now() - tStart) + 'ms');
                 }
+                // Track when backup was first committed to the player.
+                if (!streamInfo.BackupPlayingAt) {
+                    streamInfo.BackupPlayingAt = Date.now();
+                    console.log('[AD] Backup committed — user will see stream in ~2-3s');
+                }
+                // Once backup has been playing cleanly for >4s, the user is watching the
+                // stream. Don't wait for the original stream to clear its ad tags (can take
+                // 20-50s extra). Clear IsShowingAd now — ReloadPlayerAfterAd=false means
+                // we stay on the backup stream regardless.
+                const backupAge = Date.now() - streamInfo.BackupPlayingAt;
+                if (backupAge > 4000 && !hasAdTags(textStr)) {
+                    const adDurationSec = streamInfo.AdBreakStartedAt
+                        ? ((Date.now() - streamInfo.AdBreakStartedAt) / 1000).toFixed(1) : '?';
+                    console.log('[AD] Backup playing cleanly for ' + (backupAge/1000).toFixed(1) + 's — clearing ad state (total: ' + adDurationSec + 's)');
+                    streamInfo.IsShowingAd = false;
+                    streamInfo.IsStrippingAdSegments = false;
+                    streamInfo.NumStrippedAdSegments = 0;
+                    streamInfo.ActiveBackupPlayerType = null;
+                    streamInfo.BackupPlayingAt = 0;
+                    streamInfo.CleanPlaylistCount = 0;
+                    streamInfo.ConsecutiveAllStrippedPolls = 0;
+                    streamInfo.TotalAllStrippedPolls = 0;
+                    streamInfo.RequestedAds?.clear?.();
+                    postMessage({ key: 'UpdateAdBlockBanner', isMidroll: streamInfo.IsMidroll, hasAds: false, isStrippingAdSegments: false, numStrippedAdSegments: 0, activeBackupPlayerType: null });
+                    return textStr;
+                }
             } else if (!backupM3u8 && !streamInfo.BackupGaveUp) {
                 console.log('[AD] No backup found — stripping segments');
             }
             const stripHevc = isHevc && streamInfo.ModifiedM3U8;
-            if (IsAdStrippingEnabled || stripHevc) textStr = stripAdSegments(textStr, stripHevc, streamInfo);
+            // When backup is committed (backupM3u8 is non-null → already verified clean),
+            // skip stripAdSegments entirely. Calling it on backup content would add backup
+            // segment URLs to AdSegmentCache → player gets BLANK_MP4 for every segment
+            // → AVC errors + false "stripping" state. Only strip when serving the original
+            // ad-laden stream (no backup found or backup gave up).
+            if ((IsAdStrippingEnabled || stripHevc) && !backupM3u8) {
+                textStr = stripAdSegments(textStr, stripHevc, streamInfo);
+            } else if (backupM3u8) {
+                // Backup is playing — mark as not stripping
+                streamInfo.IsStrippingAdSegments = false;
+                streamInfo.NumStrippedAdSegments = 0;
+            }
             if (streamInfo.EarlyReloadAwaitingResult) {
                 streamInfo.EarlyReloadAwaitingResult = false;
                 if (!streamInfo.IsStrippingAdSegments) streamInfo.EarlyReloadTriggered = false;
@@ -1364,8 +1420,16 @@
                 if (typeof init.headers['Authorization'] === 'string' && init.headers['Authorization'] !== AuthorizationHeader)
                     postTwitchWorkerMessage('UpdateAuthorizationHeader', AuthorizationHeader = init.headers['Authorization']);
                 // Mini-player fix: suppress picture-by-picture access token requests
-                if (typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && init.body.includes('picture-by-picture'))
+                if (typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && init.body.includes('picture-by-picture')) {
                     init.body = '';
+                    // Empty body → Twitch GQL returns 400 → player retries with real token.
+                    // This sequence empirically marks the moment the stream starts loading.
+                    // Signal the worker immediately (before the 400 even comes back).
+                    if (playerBufferState.inAdBreak) {
+                        console.log('[AD] PiP suppression fired during ad — stream starting signal');
+                        postTwitchWorkerMessage('NativeTokenRequest');
+                    }
+                }
                 // Handle every PlaybackAccessToken request (skip picture-by-picture).
                 if (typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && !init.body.includes('picture-by-picture')) {
                     // Detect channel name from request body to track per-channel initial load.
@@ -1390,6 +1454,7 @@
                         // session and does not carry over preroll assignment from previous loads.
                         // (randomId was already injected above for ALL PlaybackAccessToken requests)
                         console.log('[AD] Initial load for ' + _channelName + ' — fresh device-id to skip preroll (no client-id swap)');
+                    }
 
                         // --- COMMENTED OUT: reload back to authorized stream ---
                         // The anonymous stream plays fine indefinitely. A reload causes 20-25s
@@ -1402,8 +1467,7 @@
                         //         console.log('[AD] Switching to authorized stream after anonymous start');
                         //         doTwitchPlayerTask(false, true, 'early');
                         //     }
-                        // }, 15000);
-                    }
+                        // }, 15000);                    
                 }
             }
             if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
